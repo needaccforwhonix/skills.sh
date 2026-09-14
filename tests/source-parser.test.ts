@@ -145,6 +145,25 @@ describe('parseSource', () => {
     });
   });
 
+  describe('Generic URL tests', () => {
+    it('generic HTTP URL is parsed as well-known with direct download fallback', () => {
+      const result = parseSource('https://internal.example.com/download?id=123');
+      expect(result.type).toBe('well-known');
+      expect(result.url).toBe('https://internal.example.com/download?id=123');
+    });
+
+    it.each([
+      'https://raw.githubusercontent.com/acme/skills/main/SKILL.md',
+      'https://github.com/acme/skills/releases/download/v1/skills.tgz',
+      'https://github.com/acme/skills/archive/refs/heads/main.zip',
+      'https://gitlab.com/acme/skills/-/archive/main/skills-main.tar.gz',
+    ])('parses hosted artifact URL as a direct download: %s', (url) => {
+      const result = parseSource(url);
+      expect(result.type).toBe('download');
+      expect(result.url).toBe(url);
+    });
+  });
+
   describe('GitHub shorthand tests', () => {
     it('GitHub shorthand - owner/repo', () => {
       const result = parseSource('owner/repo');
@@ -260,6 +279,13 @@ describe('parseSource', () => {
       const result = parseSource('https://git.example.com/owner/repo.git#release-2026');
       expect(result.type).toBe('git');
       expect(result.url).toBe('https://git.example.com/owner/repo.git');
+      expect(result.ref).toBe('release-2026');
+    });
+
+    it('Git URL - ssh scheme with #branch', () => {
+      const result = parseSource('ssh://git@git.example.com:7999/owner/repo.git#release-2026');
+      expect(result.type).toBe('git');
+      expect(result.url).toBe('ssh://git@git.example.com:7999/owner/repo.git');
       expect(result.ref).toBe('release-2026');
     });
   });
@@ -402,6 +428,14 @@ describe('getOwnerRepo', () => {
     expect(getOwnerRepo(parsed)).toBe('org/team/repo');
   });
 
+  it('getOwnerRepo - SSH URL with scheme and port', () => {
+    const parsed = {
+      type: 'git',
+      url: 'ssh://git@git.company.com:7999/org/team/repo.git',
+    } as const;
+    expect(getOwnerRepo(parsed)).toBe('org/team/repo');
+  });
+
   it('getOwnerRepo - SSH URL without path (returns null)', () => {
     const parsed = { type: 'git', url: 'git@github.com:repo.git' } as const;
     expect(getOwnerRepo(parsed)).toBeNull();
@@ -413,6 +447,12 @@ describe('Source aliases', () => {
     const result = parseSource('coinbase/agentWallet');
     expect(result.type).toBe('github');
     expect(result.url).toBe('https://github.com/coinbase/agentic-wallet-skills.git');
+  });
+
+  it('resolves vercel-labs/vercel-skills to vercel-labs/agent-skills', () => {
+    const result = parseSource('vercel-labs/vercel-skills');
+    expect(result.type).toBe('github');
+    expect(result.url).toBe('https://github.com/vercel-labs/agent-skills.git');
   });
 });
 
