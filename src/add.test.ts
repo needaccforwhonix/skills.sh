@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'child_process';
-import { existsSync, rmSync, mkdirSync, writeFileSync, lstatSync } from 'fs';
+import { existsSync, rmSync, mkdirSync, writeFileSync, lstatSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { runCli, stripAnsi } from './test-utils.ts';
@@ -66,6 +66,23 @@ describe('add command', () => {
     expect(result.exitCode).toBe(1);
   });
 
+  it('special-cases notion and requires the ntn CLI', () => {
+    const result = runCli(['add', 'notion', '--list'], testDir, {
+      PATH: join(testDir, 'missing-bin'),
+    });
+
+    expect(result.stdout).toContain('Notion CLI (ntn) is required');
+    const docsLine = result.stdout
+      .split('\n')
+      .find((line) => line.includes('https://developers.notion.com/cli/get-started/overview'));
+    expect(docsLine?.replace(/^\s*│?\s*/, '')).toBe(
+      'https://developers.notion.com/cli/get-started/overview'
+    );
+    expect(result.stdout).toContain('ntn login');
+    expect(result.stdout).not.toContain('Cloning repository');
+    expect(result.exitCode).toBe(1);
+  });
+
   it('should list skills from local path with --list flag', () => {
     // Create a test skill
     const skillDir = join(testDir, 'test-skill');
@@ -121,6 +138,41 @@ Instructions here.
     expect(result.stdout).toContain('my-skill');
     expect(result.stdout).toContain('Done!');
     expect(result.exitCode).toBe(0);
+  });
+
+  it('records a global install from a local path in the global skill lock', () => {
+    const skillDir = join(testDir, 'skills', 'my-skill');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(
+      join(skillDir, 'SKILL.md'),
+      `---
+name: my-skill
+description: My test skill
+---
+
+# My Skill
+
+Instructions here.
+`
+    );
+
+    const home = join(testDir, 'home');
+    mkdirSync(home, { recursive: true });
+    const targetDir = join(testDir, 'project');
+    mkdirSync(targetDir, { recursive: true });
+
+    const result = runCli(['add', testDir, '-y', '-g', '--agent', 'claude-code'], targetDir, {
+      HOME: home,
+      USERPROFILE: home,
+    });
+    expect(result.exitCode).toBe(0);
+
+    const lockPath = join(home, '.local', 'state', 'skills', '.skill-lock.json');
+    expect(existsSync(lockPath)).toBe(true);
+    const lock = JSON.parse(readFileSync(lockPath, 'utf-8'));
+    expect(lock.skills['my-skill']).toBeDefined();
+    expect(lock.skills['my-skill'].sourceType).toBe('local');
+    expect(lock.skills['my-skill'].source).toBe(testDir);
   });
 
   it('creates the project symlink for an explicitly selected non-universal agent', () => {

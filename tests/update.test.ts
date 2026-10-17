@@ -256,6 +256,8 @@ describe('Update Cleanup Unit Tests', () => {
           rawContent: '',
         },
       ]);
+      // Content is unchanged; the relocation alone must trigger the reinstall.
+      vi.mocked(localLock.computeSkillFolderHash).mockResolvedValue('same-hash');
 
       await updateProjectSkills({ yes: true });
 
@@ -266,6 +268,74 @@ describe('Update Cleanup Unit Tests', () => {
         .mock.calls.find((call) => Array.isArray(call[1]) && call[1].includes('add'));
       expect(installCall).toBeDefined();
       expect(installCall![1]).toContain('owner/repo/skills/swiftui-expert-skill');
+    });
+
+    it('does not reinstall a project skill whose content hash is unchanged', async () => {
+      vi.mocked(localLock.readLocalLock).mockResolvedValue({
+        version: 1,
+        skills: {
+          'skill-a': {
+            source: 'owner/repo',
+            sourceType: 'github',
+            skillPath: 'skills/skill-a/SKILL.md',
+            computedHash: 'same-hash',
+          },
+        },
+      });
+      vi.mocked(git.cloneRepo).mockResolvedValue('/tmp/repo');
+      vi.mocked(skills.discoverSkills).mockResolvedValue([
+        { name: 'skill-a', path: '/tmp/repo/skills/skill-a', description: 'A', rawContent: '' },
+      ]);
+      vi.mocked(localLock.computeSkillFolderHash).mockResolvedValue('same-hash');
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      const result = await updateProjectSkills({ yes: true });
+
+      expect(localLock.computeSkillFolderHash).toHaveBeenCalledWith(
+        join('/tmp/repo', 'skills/skill-a')
+      );
+      expect(spawnSync).not.toHaveBeenCalled();
+      expect(result).toEqual({ successCount: 0, failCount: 0, foundCount: 1 });
+      expect(logSpy.mock.calls.flat().join('\n')).toContain('All project skills are up to date');
+      logSpy.mockRestore();
+    });
+
+    it('reinstalls only the project skills whose content hash changed', async () => {
+      vi.mocked(localLock.readLocalLock).mockResolvedValue({
+        version: 1,
+        skills: {
+          'skill-a': {
+            source: 'owner/repo',
+            sourceType: 'github',
+            skillPath: 'skills/skill-a/SKILL.md',
+            computedHash: 'hash-a',
+          },
+          'skill-b': {
+            source: 'owner/repo',
+            sourceType: 'github',
+            skillPath: 'skills/skill-b/SKILL.md',
+            computedHash: 'hash-b-old',
+          },
+        },
+      });
+      vi.mocked(git.cloneRepo).mockResolvedValue('/tmp/repo');
+      vi.mocked(skills.discoverSkills).mockResolvedValue([
+        { name: 'skill-a', path: '/tmp/repo/skills/skill-a', description: 'A', rawContent: '' },
+        { name: 'skill-b', path: '/tmp/repo/skills/skill-b', description: 'B', rawContent: '' },
+      ]);
+      vi.mocked(localLock.computeSkillFolderHash).mockImplementation(async (dir) =>
+        dir.endsWith('skill-a') ? 'hash-a' : 'hash-b-new'
+      );
+
+      const result = await updateProjectSkills({ yes: true });
+
+      const addCalls = vi
+        .mocked(spawnSync)
+        .mock.calls.filter((call) => Array.isArray(call[1]) && call[1].includes('add'));
+      expect(addCalls).toHaveLength(1);
+      expect(addCalls[0]![1]).toContain('skill-b');
+      expect(addCalls[0]![1]).not.toContain('skill-a');
+      expect(result.successCount).toBe(1);
     });
 
     it('skips an ambiguous relocated project skill without deleting it', async () => {
@@ -301,6 +371,44 @@ describe('Update Cleanup Unit Tests', () => {
       expect(p.confirm).not.toHaveBeenCalled();
       expect(remove.removeCommand).not.toHaveBeenCalled();
       expect(spawnSync).not.toHaveBeenCalled();
+    });
+
+    it('updates a GitHub skill from its locked path when a same-name mirror exists', async () => {
+      vi.mocked(localLock.readLocalLock).mockResolvedValue({
+        version: 1,
+        skills: {
+          'skill-a': {
+            source: 'owner/repo',
+            sourceType: 'github',
+            skillPath: 'skills/skill-a/SKILL.md',
+            computedHash: 'old-hash',
+          },
+        },
+      });
+      vi.mocked(git.cloneRepo).mockResolvedValue('/tmp/repo');
+      vi.mocked(skills.discoverSkills).mockResolvedValue([
+        {
+          name: 'skill-a',
+          path: '/tmp/repo/skills/skill-a',
+          description: 'Locked location',
+          rawContent: '',
+        },
+        {
+          name: 'skill-a',
+          path: '/tmp/repo/.openclaw/skills/skill-a',
+          description: 'Mirror',
+          rawContent: '',
+        },
+      ]);
+
+      await updateProjectSkills({ yes: true });
+
+      const installCall = vi
+        .mocked(spawnSync)
+        .mock.calls.find((call) => Array.isArray(call[1]) && call[1].includes('add'));
+      expect(installCall).toBeDefined();
+      expect(installCall![1]).toContain('owner/repo/skills/skill-a');
+      expect(installCall![1]).not.toContain('owner/repo/.openclaw/skills/skill-a');
     });
 
     it('does not reinstall an ambiguous exact-path skill from a generic Git source', async () => {
@@ -537,6 +645,51 @@ describe('Update Cleanup Unit Tests', () => {
         ['skill-b'],
         expect.objectContaining({ yes: true, global: true })
       );
+    });
+
+    it('updates an exact-path global GitHub skill when fallback discovery finds a mirror', async () => {
+      const oldHash = 'a'.repeat(40);
+      const newHash = 'b'.repeat(40);
+      vi.mocked(skillLock.readSkillLock).mockResolvedValue({
+        version: 3,
+        skills: {
+          'skill-a': {
+            source: 'owner/repo',
+            sourceType: 'github',
+            sourceUrl: 'https://github.com/owner/repo',
+            skillPath: 'skills/skill-a/SKILL.md',
+            skillFolderHash: oldHash,
+            installedAt: '',
+            updatedAt: '',
+          },
+        },
+      });
+      vi.mocked(blob.fetchRepoTree).mockResolvedValue(null);
+      vi.mocked(git.cloneRepo).mockResolvedValue('/tmp/repo');
+      vi.mocked(skills.discoverSkills).mockResolvedValue([
+        {
+          name: 'skill-a',
+          path: '/tmp/repo/skills/skill-a',
+          description: 'Locked location',
+          rawContent: '',
+        },
+        {
+          name: 'skill-a',
+          path: '/tmp/repo/.openclaw/skills/skill-a',
+          description: 'Mirror',
+          rawContent: '',
+        },
+      ]);
+      vi.mocked(git.getGitTreeHash).mockResolvedValue(newHash);
+
+      await updateGlobalSkills({ yes: true });
+
+      expect(git.getGitTreeHash).toHaveBeenCalledWith('/tmp/repo', 'skills/skill-a/SKILL.md');
+      const installCall = vi
+        .mocked(spawnSync)
+        .mock.calls.find((call) => Array.isArray(call[1]) && call[1].includes('add'));
+      expect(installCall).toBeDefined();
+      expect(installCall![1]).toContain('owner/repo/skills/skill-a');
     });
 
     it('reinstalls a relocated global skill even when its content hash is unchanged', async () => {
